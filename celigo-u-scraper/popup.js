@@ -1,0 +1,696 @@
+/**
+ * Celigo U Scraper - Popup Script
+ * Handles UI interactions and communicates with content scripts
+ * @version 1.0.3
+ */
+
+// UI elements to exclude from scraping (navigation buttons, markers, etc.)
+const EXCLUDE_LABELS = [
+    'close modal',
+    'previous',
+    'next',
+    'back',
+    'submit',
+    'continue',
+    'skip',
+    'menu',
+    'not viewed',
+    'marker,',
+    'information, not viewed'
+];
+
+// Function to check if a label should be excluded
+function shouldExcludeLabel(label) {
+    if (!label) return true;
+    const lowerLabel = label.toLowerCase().trim();
+    // Exclude if too short or matches exclusion patterns
+    if (lowerLabel.length < 5) return true;
+    return EXCLUDE_LABELS.some(ex => lowerLabel.includes(ex) || lowerLabel === ex);
+}
+
+// Function to parse a label into title and description
+function parseLabel(label) {
+    if (!label) return { title: '', description: '' };
+
+    // Common patterns where title runs into description:
+    // "StatusThis shows whether..." -> "Status" | "This shows whether..."
+    // "Enable userYou can turn off..." -> "Enable user" | "You can turn off..."
+    // "Require MFAThe first time..." -> "Require MFA" | "The first time..."
+    // "ActionsSelecting the ellipsis..." -> "Actions" | "Selecting the ellipsis..."
+
+    // Pattern 1: Title (possibly with spaces/uppercase words) followed by sentence starter
+    // This catches: "Require MFAThe first..." or "Enable userYou can..."
+    const sentenceStartMatch = label.match(/^(.+?)((?:The|This|You|When|If|A |An |It |Select|In |On |Use|Click|Choosing|Enabling|Disabling|MFA |Note:|Tip:)[^]*)/);
+    if (sentenceStartMatch && sentenceStartMatch[1].length <= 50) {
+        let title = sentenceStartMatch[1].trim();
+        let description = sentenceStartMatch[2].trim();
+
+        // Clean up title if it ends with partial word that belongs to description
+        // e.g., "Require MFAThe" -> check if description starts reasonably
+        if (description.match(/^[a-z]/)) {
+            // Description starts lowercase, title might have grabbed too much
+            const reparse = title.match(/^(.+?)([A-Z][a-z].*)$/);
+            if (reparse) {
+                title = reparse[1].trim();
+                description = reparse[2] + description;
+            }
+        }
+
+        return { title, description };
+    }
+
+    // Pattern 2: Simple boundary - word(s) ending in lowercase, then uppercase starts description
+    const boundaryMatch = label.match(/^([A-Z][a-zA-Z\s]{1,40}?)([A-Z][a-z].*)/);
+    if (boundaryMatch) {
+        return {
+            title: boundaryMatch[1].trim(),
+            description: boundaryMatch[2].trim()
+        };
+    }
+
+    // Pattern 3: Colon or dash separator
+    const separatorMatch = label.match(/^([^:–—-]{3,40})(?:\s*[:–—-]\s*)(.+)/);
+    if (separatorMatch) {
+        return {
+            title: separatorMatch[1].trim(),
+            description: separatorMatch[2].trim()
+        };
+    }
+
+    // If no pattern found, return full text as description
+    return {
+        title: '',
+        description: label.trim()
+    };
+}
+
+// Generate content hash for deduplication
+function generateContentHash(item) {
+    if (!item) return '';
+
+    // For hotspots, hash based on the actual point content
+    if (item.points && Array.isArray(item.points)) {
+        const pointContent = item.points
+            .map(p => p.title || p.description || p.label || '')
+            .filter(s => s.length > 0)
+            .join('|');
+        return pointContent.substring(0, 200);
+    }
+
+    // For other items, use their primary content
+    const content = item.content || item.question || item.title || item.description || item.label || '';
+    return content.substring(0, 200);
+}
+
+class CeligoUScraper {
+    constructor() {
+        this.currentData = null;
+        this.initElements();
+        this.initEventListeners();
+        this.checkPageStatus();
+    }
+
+    initElements() {
+        this.elements = {
+            pageStatus: document.getElementById('page-status'),
+            courseName: document.getElementById('course-name'),
+            lessonName: document.getElementById('lesson-name'),
+            scrapeBtn: document.getElementById('scrape-btn'),
+            copyBtn: document.getElementById('copy-btn'),
+            loading: document.getElementById('loading'),
+            resultsList: document.getElementById('results-list'),
+            totalCount: document.getElementById('total-count'),
+            messageArea: document.getElementById('message-area'),
+            jsonOutput: document.getElementById('json-output'),
+            summaryTab: document.getElementById('summary-tab'),
+            jsonTab: document.getElementById('json-tab'),
+            tabs: document.querySelectorAll('.tab')
+        };
+    }
+
+    initEventListeners() {
+        this.elements.scrapeBtn.addEventListener('click', () => this.scrapeContent());
+        this.elements.copyBtn.addEventListener('click', () => this.copyToClipboard());
+        
+        this.elements.tabs.forEach(tab => {
+            tab.addEventListener('click', (e) => this.switchTab(e.target.dataset.tab));
+        });
+    }
+
+    async checkPageStatus() {
+        try {
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            
+            if (!tab.url.includes('training.celigo.com')) {
+                this.setPageStatus('Not a Celigo U page', 'error');
+                this.showMessage('Navigate to a Celigo U training page to use this extension.', 'info');
+                return;
+            }
+
+            // Get page metadata from content script
+            const response = await chrome.tabs.sendMessage(tab.id, { action: 'getPageInfo' });
+            
+            if (response && response.success) {
+                this.setPageStatus('Ready', 'success');
+                this.elements.courseName.textContent = response.data.course || '—';
+                this.elements.lessonName.textContent = response.data.lesson || '—';
+                this.elements.scrapeBtn.disabled = false;
+            } else {
+                this.setPageStatus('Page ready', 'success');
+                this.elements.scrapeBtn.disabled = false;
+            }
+        } catch (error) {
+            console.error('Status check error:', error);
+            this.setPageStatus('Extension not loaded', 'error');
+            this.showMessage('Refresh the page and try again.', 'info');
+        }
+    }
+
+    setPageStatus(text, type = 'normal') {
+        this.elements.pageStatus.textContent = text;
+        this.elements.pageStatus.className = 'status-value';
+        if (type !== 'normal') {
+            this.elements.pageStatus.classList.add(type);
+        }
+    }
+
+    showMessage(text, type = 'info') {
+        this.elements.messageArea.innerHTML = `<div class="message ${type}">${text}</div>`;
+    }
+
+    clearMessage() {
+        this.elements.messageArea.innerHTML = '';
+    }
+
+    async scrapeContent() {
+        this.clearMessage();
+        this.elements.loading.classList.add('active');
+        this.elements.scrapeBtn.disabled = true;
+
+        try {
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+            // Method 1: Try direct message to content scripts
+            let mainResponse = null;
+            let iframeResponse = null;
+            
+            try {
+                mainResponse = await chrome.tabs.sendMessage(tab.id, { action: 'scrapeMainPage' });
+            } catch (e) {
+                console.log('Main page scrape note:', e.message);
+            }
+
+            try {
+                iframeResponse = await chrome.tabs.sendMessage(tab.id, { action: 'scrapeIframe' });
+            } catch (e) {
+                console.log('Iframe scrape note:', e.message);
+            }
+
+            // Method 2: Try executing script directly in all frames via background
+            let allFramesResponse = null;
+            try {
+                allFramesResponse = await chrome.runtime.sendMessage({ action: 'executeInAllFrames' });
+            } catch (e) {
+                console.log('All frames execution note:', e.message);
+            }
+
+            // Method 3: Try direct script injection
+            let injectedResponse = null;
+            try {
+                const injectionResults = await chrome.scripting.executeScript({
+                    target: { tabId: tab.id, allFrames: true },
+                    func: () => {
+                        // === INLINE HELPER FUNCTIONS ===
+                        // (duplicated here because injected scripts can't access outer scope)
+
+                        const EXCLUDE_LABELS = [
+                            'close modal', 'previous', 'next', 'back', 'submit',
+                            'continue', 'skip', 'menu', 'not viewed', 'marker,',
+                            'information, not viewed'
+                        ];
+
+                        function shouldExcludeLabel(label) {
+                            if (!label) return true;
+                            const lowerLabel = label.toLowerCase().trim();
+                            if (lowerLabel.length < 5) return true;
+                            return EXCLUDE_LABELS.some(ex => lowerLabel.includes(ex) || lowerLabel === ex);
+                        }
+
+                        function parseLabel(label) {
+                            if (!label) return { title: '', description: '' };
+
+                            // Pattern 1: Title followed by sentence starter
+                            const sentenceStartMatch = label.match(/^(.+?)((?:The|This|You|When|If|A |An |It |Select|In |On |Use|Click|Choosing|Enabling|Disabling|MFA |Note:|Tip:)[^]*)/);
+                            if (sentenceStartMatch && sentenceStartMatch[1].length <= 50) {
+                                let title = sentenceStartMatch[1].trim();
+                                let description = sentenceStartMatch[2].trim();
+
+                                // Clean up if description starts lowercase
+                                if (description.match(/^[a-z]/)) {
+                                    const reparse = title.match(/^(.+?)([A-Z][a-z].*)$/);
+                                    if (reparse) {
+                                        title = reparse[1].trim();
+                                        description = reparse[2] + description;
+                                    }
+                                }
+                                return { title, description };
+                            }
+
+                            // Pattern 2: Simple boundary
+                            const boundaryMatch = label.match(/^([A-Z][a-zA-Z\s]{1,40}?)([A-Z][a-z].*)/);
+                            if (boundaryMatch) {
+                                return { title: boundaryMatch[1].trim(), description: boundaryMatch[2].trim() };
+                            }
+
+                            // Pattern 3: Colon/dash separator
+                            const separatorMatch = label.match(/^([^:–—-]{3,40})(?:\s*[:–—-]\s*)(.+)/);
+                            if (separatorMatch) {
+                                return { title: separatorMatch[1].trim(), description: separatorMatch[2].trim() };
+                            }
+
+                            return { title: '', description: label.trim() };
+                        }
+
+                        // === EXTRACTION LOGIC ===
+                        const content = {
+                            flipCards: [],
+                            hotspots: [],
+                            knowledgeChecks: [],
+                            accordions: [],
+                            tabs: [],
+                            textBlocks: [],
+                            lists: [],
+                            tables: [],
+                            images: []
+                        };
+
+                        // Extract metadata from page
+                        const metadata = {
+                            course: '',
+                            lesson: '',
+                            path: ''
+                        };
+
+                        // Try to get course/lesson from breadcrumbs or page structure
+                        const breadcrumbs = document.querySelectorAll('.breadcrumb a, .breadcrumbs a, nav a');
+                        if (breadcrumbs.length > 0) {
+                            const crumbs = Array.from(breadcrumbs).map(a => a.textContent.trim());
+                            if (crumbs.length >= 2) {
+                                metadata.path = crumbs[0] || '';
+                                metadata.course = crumbs[crumbs.length - 2] || '';
+                            }
+                        }
+
+                        // Try to get lesson name from h1
+                        const h1 = document.querySelector('h1');
+                        if (h1) {
+                            const h1Text = h1.textContent.trim();
+                            // Remove duration if present (e.g., "Account Settings 0 hr 20 min")
+                            metadata.lesson = h1Text.replace(/\s*\d+\s*hr\s*\d*\s*min\s*$/i, '').trim();
+                        }
+
+                        // Try Skilljar-specific selectors
+                        const courseTitle = document.querySelector('.course-title, [class*="course-name"], .lesson-title');
+                        if (courseTitle && !metadata.course) {
+                            metadata.course = courseTitle.textContent.trim();
+                        }
+
+                        // Store metadata in content for later retrieval
+                        content.metadata = metadata;
+
+                        // Get all text content (NO TRUNCATION)
+                        document.querySelectorAll('h1, h2, h3, h4, p').forEach((el, i) => {
+                            const text = el.textContent.trim();
+                            if (text && text.length > 10) {
+                                content.textBlocks.push({
+                                    id: `injected-text-${i}`,
+                                    tagName: el.tagName,
+                                    content: text  // Full text, no truncation
+                                });
+                            }
+                        });
+
+                        // Get labeled graphic content with filtering and parsing
+                        document.querySelectorAll('[class*="labeled-graphic"]').forEach((lg, i) => {
+                            const items = [];
+                            let pointIndex = 0;
+
+                            lg.querySelectorAll('[class*="item"], button, [role="button"]').forEach((item) => {
+                                const rawLabel = item.getAttribute('aria-label') || item.textContent.trim();
+
+                                // Skip UI buttons and navigation elements
+                                if (shouldExcludeLabel(rawLabel)) return;
+
+                                // Parse label into title and description
+                                const parsed = parseLabel(rawLabel);
+
+                                items.push({
+                                    index: pointIndex++,
+                                    title: parsed.title,
+                                    description: parsed.description,
+                                    rawLabel: rawLabel  // Keep original for reference
+                                });
+                            });
+
+                            if (items.length > 0) {
+                                content.hotspots.push({
+                                    id: `injected-lg-${i}`,
+                                    points: items
+                                });
+                            }
+                        });
+
+                        // Get accordions
+                        document.querySelectorAll('[class*="accordion"], .accordion').forEach((acc, i) => {
+                            const panels = [];
+                            acc.querySelectorAll('[class*="accordion-item"], [class*="panel"], details').forEach((panel, j) => {
+                                const header = panel.querySelector('[class*="header"], summary, button')?.textContent.trim();
+                                const body = panel.querySelector('[class*="body"], [class*="content"], .panel-body')?.textContent.trim();
+                                if (header || body) {
+                                    panels.push({
+                                        index: j,
+                                        title: header || '',
+                                        content: body || ''
+                                    });
+                                }
+                            });
+                            if (panels.length > 0) {
+                                content.accordions.push({
+                                    id: `injected-acc-${i}`,
+                                    panels: panels
+                                });
+                            }
+                        });
+
+                        // Get flip cards
+                        document.querySelectorAll('[class*="flip-card"], .flip-card, [class*="flashcard"]').forEach((card, i) => {
+                            const front = card.querySelector('[class*="front"], .front, [class*="face"]:first-child')?.textContent.trim();
+                            const back = card.querySelector('[class*="back"], .back, [class*="face"]:last-child')?.textContent.trim();
+                            if (front || back) {
+                                content.flipCards.push({
+                                    id: `injected-fc-${i}`,
+                                    front: front || '',
+                                    back: back || ''
+                                });
+                            }
+                        });
+
+                        // Get tables
+                        document.querySelectorAll('table').forEach((table, i) => {
+                            const headers = Array.from(table.querySelectorAll('th')).map(th => th.textContent.trim());
+                            const rows = Array.from(table.querySelectorAll('tbody tr')).map(tr =>
+                                Array.from(tr.querySelectorAll('td')).map(td => td.textContent.trim())
+                            );
+                            if (headers.length > 0 || rows.length > 0) {
+                                content.tables.push({ id: `injected-table-${i}`, headers, rows });
+                            }
+                        });
+
+                        // Get lists (only filter navigation-specific items, keep most content)
+                        document.querySelectorAll('ul, ol').forEach((list, i) => {
+                            const items = Array.from(list.querySelectorAll(':scope > li'))
+                                .map(li => li.textContent.trim())
+                                .filter(text => {
+                                    if (text.length < 3) return false;
+                                    // Only filter exact matches for nav items, not content that contains these words
+                                    const lowerText = text.toLowerCase();
+                                    const navOnly = ['previous', 'next', 'close modal', 'skip', 'menu'];
+                                    return !navOnly.some(nav => lowerText === nav);
+                                });
+                            if (items.length > 0) {
+                                content.lists.push({ id: `injected-list-${i}`, items });
+                            }
+                        });
+
+                        // Get knowledge checks / quiz questions
+                        document.querySelectorAll('[class*="knowledge"], [class*="quiz"], [class*="question"], [class*="assessment"]').forEach((q, i) => {
+                            const questionText = q.querySelector('h2, h3, h4, p, [class*="question-text"]')?.textContent.trim();
+                            const choices = Array.from(q.querySelectorAll('[class*="choice"], [class*="option"], [class*="answer"], li, label'))
+                                .map(c => c.textContent.trim())
+                                .filter(t => t.length > 0 && !shouldExcludeLabel(t));
+
+                            // Try to find correct answer indicator
+                            const correctChoice = q.querySelector('[class*="correct"], [aria-checked="true"], .selected');
+                            const correctAnswer = correctChoice ? correctChoice.textContent.trim() : '';
+
+                            // Try to find feedback
+                            const feedback = q.querySelector('[class*="feedback"], [class*="explanation"]')?.textContent.trim();
+
+                            if (questionText && questionText.length > 10) {
+                                content.knowledgeChecks.push({
+                                    id: `injected-kc-${i}`,
+                                    question: questionText,
+                                    choices: choices,
+                                    correctAnswer: correctAnswer,
+                                    feedback: feedback || ''
+                                });
+                            }
+                        });
+
+                        return content;
+                    }
+                });
+
+                // Aggregate injection results
+                injectedResponse = {
+                    success: true,
+                    data: { content: {} }
+                };
+                
+                injectionResults.forEach(result => {
+                    if (result.result) {
+                        Object.keys(result.result).forEach(key => {
+                            if (!injectedResponse.data.content[key]) {
+                                injectedResponse.data.content[key] = [];
+                            }
+                            if (Array.isArray(result.result[key])) {
+                                injectedResponse.data.content[key].push(...result.result[key]);
+                            }
+                        });
+                    }
+                });
+            } catch (e) {
+                console.log('Script injection note:', e.message);
+            }
+
+            // Combine all results
+            this.currentData = this.combineResults(mainResponse, iframeResponse, allFramesResponse, injectedResponse);
+            
+            // Update UI
+            this.displayResults(this.currentData);
+            this.elements.copyBtn.disabled = false;
+            
+            const totalItems = this.currentData.statistics.totalItems;
+            if (totalItems > 0) {
+                this.showMessage(`Content extracted successfully! Found ${totalItems} items.`, 'success');
+            } else {
+                this.showMessage('No interactive content found. Try scrolling through the lesson first to load all content.', 'info');
+            }
+
+        } catch (error) {
+            console.error('Scrape error:', error);
+            this.showMessage('Error extracting content. Try refreshing the page.', 'error');
+        } finally {
+            this.elements.loading.classList.remove('active');
+            this.elements.scrapeBtn.disabled = false;
+        }
+    }
+
+    combineResults(...responses) {
+        const combined = {
+            metadata: {
+                scrapedAt: new Date().toISOString(),
+                url: '',
+                course: '',
+                lesson: '',
+                path: ''
+            },
+            content: {
+                flipCards: [],
+                hotspots: [],
+                knowledgeChecks: [],
+                accordions: [],
+                tabs: [],
+                images: [],
+                textBlocks: [],
+                lists: [],
+                tables: [],
+                videos: [],
+                rawText: ''
+            },
+            statistics: {}
+        };
+
+        // Merge all responses
+        responses.forEach(response => {
+            if (response && response.success && response.data) {
+                // Merge metadata from response.data.metadata
+                if (response.data.metadata) {
+                    Object.keys(response.data.metadata).forEach(key => {
+                        if (response.data.metadata[key] && !combined.metadata[key]) {
+                            combined.metadata[key] = response.data.metadata[key];
+                        }
+                    });
+                }
+
+                // Merge content
+                if (response.data.content) {
+                    Object.keys(response.data.content).forEach(key => {
+                        // Skip metadata nested in content (we handle it separately)
+                        if (key === 'metadata') {
+                            // Extract metadata from content if present
+                            Object.keys(response.data.content.metadata).forEach(metaKey => {
+                                if (response.data.content.metadata[metaKey] && !combined.metadata[metaKey]) {
+                                    combined.metadata[metaKey] = response.data.content.metadata[metaKey];
+                                }
+                            });
+                            return;
+                        }
+
+                        if (Array.isArray(combined.content[key]) && Array.isArray(response.data.content[key])) {
+                            combined.content[key].push(...response.data.content[key]);
+                        } else if (response.data.content[key]) {
+                            combined.content[key] = response.data.content[key];
+                        }
+                    });
+                }
+            }
+        });
+
+        // === IMPROVED DEDUPLICATION ===
+        Object.keys(combined.content).forEach(key => {
+            if (Array.isArray(combined.content[key])) {
+                const seen = new Set();
+                combined.content[key] = combined.content[key].filter(item => {
+                    // Generate a content-based hash for deduplication
+                    const hash = generateContentHash(item);
+                    if (!hash || hash.length < 5) return false; // Skip empty items
+                    if (seen.has(hash)) return false;
+                    seen.add(hash);
+                    return true;
+                });
+            }
+        });
+
+        // === ADDITIONAL CLEANUP ===
+        // Remove duplicate hotspot points within each hotspot
+        combined.content.hotspots = combined.content.hotspots.map(hotspot => {
+            if (hotspot.points && Array.isArray(hotspot.points)) {
+                const seenPoints = new Set();
+                hotspot.points = hotspot.points.filter(point => {
+                    const pointHash = (point.title || '') + '|' + (point.description || '').substring(0, 50);
+                    if (seenPoints.has(pointHash)) return false;
+                    seenPoints.add(pointHash);
+                    return true;
+                });
+            }
+            return hotspot;
+        }).filter(h => h.points && h.points.length > 0);
+
+        // Remove duplicate text blocks with same content
+        const textSeen = new Set();
+        combined.content.textBlocks = combined.content.textBlocks.filter(block => {
+            const contentHash = (block.content || '').substring(0, 100);
+            if (textSeen.has(contentHash)) return false;
+            textSeen.add(contentHash);
+            return true;
+        });
+
+        // Remove duplicate list items
+        const listSeen = new Set();
+        combined.content.lists = combined.content.lists.filter(list => {
+            const listHash = (list.items || []).join('|').substring(0, 150);
+            if (listSeen.has(listHash)) return false;
+            listSeen.add(listHash);
+            return true;
+        });
+
+        // Calculate statistics
+        combined.statistics = {
+            flipCards: combined.content.flipCards.length,
+            hotspots: combined.content.hotspots.length,
+            knowledgeChecks: combined.content.knowledgeChecks.length,
+            accordions: combined.content.accordions.length,
+            tabs: combined.content.tabs.length,
+            images: combined.content.images.length,
+            textBlocks: combined.content.textBlocks.length,
+            lists: combined.content.lists.length,
+            tables: combined.content.tables.length,
+            videos: combined.content.videos.length,
+            totalItems: 0
+        };
+
+        combined.statistics.totalItems = Object.values(combined.statistics)
+            .filter(v => typeof v === 'number')
+            .reduce((a, b) => a + b, 0);
+
+        return combined;
+    }
+
+    displayResults(data) {
+        // Update summary list
+        const items = [];
+        const stats = data.statistics;
+
+        if (stats.flipCards > 0) items.push({ type: 'Flip Cards', count: stats.flipCards });
+        if (stats.hotspots > 0) items.push({ type: 'Hotspots', count: stats.hotspots });
+        if (stats.knowledgeChecks > 0) items.push({ type: 'Knowledge Checks', count: stats.knowledgeChecks });
+        if (stats.accordions > 0) items.push({ type: 'Accordions', count: stats.accordions });
+        if (stats.tabs > 0) items.push({ type: 'Tab Sections', count: stats.tabs });
+        if (stats.images > 0) items.push({ type: 'Images', count: stats.images });
+        if (stats.textBlocks > 0) items.push({ type: 'Text Blocks', count: stats.textBlocks });
+        if (stats.lists > 0) items.push({ type: 'Lists', count: stats.lists });
+        if (stats.tables > 0) items.push({ type: 'Tables', count: stats.tables });
+        if (stats.videos > 0) items.push({ type: 'Videos', count: stats.videos });
+
+        if (items.length === 0) {
+            this.elements.resultsList.innerHTML = '<li><span class="type">No interactive content found</span></li>';
+        } else {
+            this.elements.resultsList.innerHTML = items.map(item => 
+                `<li><span class="type">${item.type}</span><span class="count">${item.count}</span></li>`
+            ).join('');
+        }
+
+        this.elements.totalCount.textContent = `${stats.totalItems} items`;
+
+        // Update JSON output
+        this.elements.jsonOutput.textContent = JSON.stringify(data, null, 2);
+    }
+
+    switchTab(tabName) {
+        this.elements.tabs.forEach(tab => {
+            tab.classList.toggle('active', tab.dataset.tab === tabName);
+        });
+
+        this.elements.summaryTab.classList.toggle('hidden', tabName !== 'summary');
+        this.elements.jsonTab.classList.toggle('hidden', tabName !== 'json');
+    }
+
+    async copyToClipboard() {
+        if (!this.currentData) {
+            this.showMessage('No data to copy. Scrape content first.', 'error');
+            return;
+        }
+
+        try {
+            const jsonStr = JSON.stringify(this.currentData, null, 2);
+            await navigator.clipboard.writeText(jsonStr);
+            this.showMessage('JSON copied to clipboard!', 'success');
+            
+            // Visual feedback
+            const originalText = this.elements.copyBtn.innerHTML;
+            this.elements.copyBtn.innerHTML = '<span class="icon">✓</span> Copied!';
+            setTimeout(() => {
+                this.elements.copyBtn.innerHTML = originalText;
+            }, 2000);
+        } catch (error) {
+            console.error('Copy error:', error);
+            this.showMessage('Failed to copy. Try selecting and copying manually.', 'error');
+        }
+    }
+}
+
+// Initialize when popup loads
+document.addEventListener('DOMContentLoaded', () => {
+    new CeligoUScraper();
+});

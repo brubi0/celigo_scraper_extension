@@ -1,0 +1,17 @@
+# Build artifacts
+*.zip
+
+# Test/temp files
+scrapped_Json.txt
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Node (if added later)
+node_modules/
