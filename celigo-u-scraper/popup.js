@@ -1,10 +1,10 @@
 /**
  * Celigo U Scraper - Popup Script
  * Handles UI interactions and communicates with content scripts
- * @version 1.0.7
+ * @version 1.0.8
  */
 
-const VERSION = '1.0.7';
+const VERSION = '1.0.8';
 
 // UI elements to exclude from scraping (navigation buttons, markers, etc.)
 const EXCLUDE_LABELS = [
@@ -558,17 +558,14 @@ class CeligoUScraper {
                             });
                         });
 
-                        // Selector 5: Rise 360 flashcard-side pattern (actual Rise 360 structure)
-                        // Look for flashcard containers that have flashcard-side__content children
-                        document.querySelectorAll('[class*="flashcard-block"], [class*="flashcard-container"], [class*="flashcards-block"]').forEach((container, i) => {
-                            // Each flashcard has two sides with flashcard-side__content
-                            const sides = container.querySelectorAll('[class*="flashcard-side__content"]');
-                            // Group sides in pairs (front, back)
-                            for (let j = 0; j < sides.length; j += 2) {
-                                const frontSide = sides[j];
-                                const backSide = sides[j + 1];
-                                const front = frontSide?.querySelector('.fr-view, [class*="description"]')?.textContent.trim() || frontSide?.textContent.trim() || '';
-                                const back = backSide?.querySelector('.fr-view, [class*="description"]')?.textContent.trim() || backSide?.textContent.trim() || '';
+                        // Selector 5: Rise 360 block-flashcards (standard Rise 360 structure)
+                        // Structure: .block-flashcards > ol > li.flashcard > .flashcard-side--front/.flashcard-side--back
+                        document.querySelectorAll('.block-flashcards, [class*="block-flashcards"]').forEach((container, i) => {
+                            container.querySelectorAll('li.flashcard, [class*="flashcard"][role="listitem"]').forEach((card, j) => {
+                                const frontEl = card.querySelector('.flashcard-side--front .fr-view p, [class*="flashcard-side--front"] .fr-view p');
+                                const backEl = card.querySelector('.flashcard-side--back .fr-view p, [class*="flashcard-side--back"] .fr-view p');
+                                const front = frontEl?.textContent.trim() || '';
+                                const back = backEl?.textContent.trim() || '';
                                 if (front && !content.flipCards.some(fc => fc.front === front)) {
                                     content.flipCards.push({
                                         id: `injected-fc-rise360-${i}-${j}`,
@@ -576,30 +573,23 @@ class CeligoUScraper {
                                         back: back
                                     });
                                 }
-                            }
+                            });
                         });
 
-                        // Selector 6: Individual flashcard-side__description elements (fallback)
-                        const flashcardDescriptions = document.querySelectorAll('[class*="flashcard-side__description"]');
-                        const descTexts = [];
-                        flashcardDescriptions.forEach(desc => {
-                            const text = desc.querySelector('.fr-view p')?.textContent.trim() || desc.textContent.trim();
-                            if (text && text.length > 3) {
-                                descTexts.push(text);
-                            }
-                        });
-                        // Pair them as front/back
-                        for (let i = 0; i < descTexts.length; i += 2) {
-                            const front = descTexts[i];
-                            const back = descTexts[i + 1] || '';
+                        // Selector 6: Fallback - find any li.flashcard even without container
+                        document.querySelectorAll('li.flashcard').forEach((card, i) => {
+                            const frontEl = card.querySelector('.flashcard-side--front .fr-view p');
+                            const backEl = card.querySelector('.flashcard-side--back .fr-view p');
+                            const front = frontEl?.textContent.trim() || '';
+                            const back = backEl?.textContent.trim() || '';
                             if (front && !content.flipCards.some(fc => fc.front === front)) {
                                 content.flipCards.push({
-                                    id: `injected-fc-desc-${i}`,
+                                    id: `injected-fc-li-${i}`,
                                     front: front,
                                     back: back
                                 });
                             }
-                        }
+                        });
 
                         // Get tables
                         document.querySelectorAll('table').forEach((table, i) => {

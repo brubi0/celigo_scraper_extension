@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Celigo U Content Scraper",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "Extract flip cards, hotspots, knowledge checks, and other learning content from Celigo University training pages for flashcard generation",
   "author": "Bruno Rubio - Urku Consulting",
   "permissions": [
