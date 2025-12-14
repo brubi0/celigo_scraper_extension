@@ -1,8 +1,10 @@
 /**
  * Celigo U Scraper - Popup Script
  * Handles UI interactions and communicates with content scripts
- * @version 1.0.3
+ * @version 1.0.4
  */
+
+const VERSION = '1.0.4';
 
 // UI elements to exclude from scraping (navigation buttons, markers, etc.)
 const EXCLUDE_LABELS = [
@@ -17,6 +19,17 @@ const EXCLUDE_LABELS = [
     'not viewed',
     'marker,',
     'information, not viewed'
+];
+
+// False positive knowledge check patterns (system messages, not actual quiz questions)
+const FALSE_POSITIVE_KC = [
+    'you are offline',
+    'trying to reconnect',
+    'loading',
+    'please wait',
+    'error occurred',
+    'begin by',
+    'select either option'
 ];
 
 // Function to check if a label should be excluded
@@ -40,7 +53,7 @@ function parseLabel(label) {
 
     // Pattern 1: Title (possibly with spaces/uppercase words) followed by sentence starter
     // This catches: "Require MFAThe first..." or "Enable userYou can..."
-    const sentenceStartMatch = label.match(/^(.+?)((?:The|This|You|When|If|A |An |It |Select|In |On |Use|Click|Choosing|Enabling|Disabling|MFA |Note:|Tip:)[^]*)/);
+    const sentenceStartMatch = label.match(/^(.+?)((?:The|This|You|When|If|A |An |It |Select|In |On |Use|Click|Choosing|Enabling|Disabling|What|Where|How|Why|Which|MFA |Note:|Tip:|Generally|Additional)[^]*)/);
     if (sentenceStartMatch && sentenceStartMatch[1].length <= 50) {
         let title = sentenceStartMatch[1].trim();
         let description = sentenceStartMatch[2].trim();
@@ -240,7 +253,7 @@ class CeligoUScraper {
                             if (!label) return { title: '', description: '' };
 
                             // Pattern 1: Title followed by sentence starter
-                            const sentenceStartMatch = label.match(/^(.+?)((?:The|This|You|When|If|A |An |It |Select|In |On |Use|Click|Choosing|Enabling|Disabling|MFA |Note:|Tip:)[^]*)/);
+                            const sentenceStartMatch = label.match(/^(.+?)((?:The|This|You|When|If|A |An |It |Select|In |On |Use|Click|Choosing|Enabling|Disabling|What|Where|How|Why|Which|MFA |Note:|Tip:|Generally|Additional)[^]*)/);
                             if (sentenceStartMatch && sentenceStartMatch[1].length <= 50) {
                                 let title = sentenceStartMatch[1].trim();
                                 let description = sentenceStartMatch[2].trim();
@@ -269,6 +282,18 @@ class CeligoUScraper {
                             }
 
                             return { title: '', description: label.trim() };
+                        }
+
+                        // False positive knowledge check patterns
+                        const FALSE_POSITIVE_KC = [
+                            'you are offline', 'trying to reconnect', 'loading',
+                            'please wait', 'error occurred', 'begin by', 'select either option'
+                        ];
+
+                        function isFalsePositiveKC(question) {
+                            if (!question) return true;
+                            const lower = question.toLowerCase();
+                            return FALSE_POSITIVE_KC.some(fp => lower.includes(fp));
                         }
 
                         // === EXTRACTION LOGIC ===
@@ -382,13 +407,40 @@ class CeligoUScraper {
                             }
                         });
 
-                        // Get flip cards
-                        document.querySelectorAll('[class*="flip-card"], .flip-card, [class*="flashcard"]').forEach((card, i) => {
-                            const front = card.querySelector('[class*="front"], .front, [class*="face"]:first-child')?.textContent.trim();
-                            const back = card.querySelector('[class*="back"], .back, [class*="face"]:last-child')?.textContent.trim();
+                        // Get flip cards - Rise 360 uses specific class patterns
+                        document.querySelectorAll('[class*="flip-card"], .flip-card, [class*="flashcard"], [class*="blocks-flip"], .blocks-flip-card').forEach((card, i) => {
+                            // Try multiple selector patterns for front/back
+                            let front = card.querySelector('[class*="flip-card__front"], [class*="front"], .front, [class*="face-front"]')?.textContent.trim();
+                            let back = card.querySelector('[class*="flip-card__back"], [class*="back"], .back, [class*="face-back"]')?.textContent.trim();
+
+                            // Rise 360 sometimes uses data attributes or specific child structure
+                            if (!front && !back) {
+                                const faces = card.querySelectorAll('[class*="face"], [class*="side"]');
+                                if (faces.length >= 2) {
+                                    front = faces[0]?.textContent.trim();
+                                    back = faces[1]?.textContent.trim();
+                                }
+                            }
+
+                            // Also try aria-label patterns
+                            if (!front) front = card.getAttribute('aria-label') || '';
+
                             if (front || back) {
                                 content.flipCards.push({
                                     id: `injected-fc-${i}`,
+                                    front: front || '',
+                                    back: back || ''
+                                });
+                            }
+                        });
+
+                        // Additional Rise 360 flip card pattern - sometimes in separate containers
+                        document.querySelectorAll('[data-block-type="flip-card"], [class*="FlipCard"]').forEach((card, i) => {
+                            const front = card.querySelector('[class*="front"], [data-side="front"]')?.textContent.trim();
+                            const back = card.querySelector('[class*="back"], [data-side="back"]')?.textContent.trim();
+                            if ((front || back) && !content.flipCards.some(fc => fc.front === front && fc.back === back)) {
+                                content.flipCards.push({
+                                    id: `injected-fc-rise-${i}`,
                                     front: front || '',
                                     back: back || ''
                                 });
@@ -425,6 +477,12 @@ class CeligoUScraper {
                         // Get knowledge checks / quiz questions
                         document.querySelectorAll('[class*="knowledge"], [class*="quiz"], [class*="question"], [class*="assessment"]').forEach((q, i) => {
                             const questionText = q.querySelector('h2, h3, h4, p, [class*="question-text"]')?.textContent.trim();
+
+                            // Skip false positive knowledge checks (system messages, instructions)
+                            if (!questionText || questionText.length < 10 || isFalsePositiveKC(questionText)) {
+                                return;
+                            }
+
                             const choices = Array.from(q.querySelectorAll('[class*="choice"], [class*="option"], [class*="answer"], li, label'))
                                 .map(c => c.textContent.trim())
                                 .filter(t => t.length > 0 && !shouldExcludeLabel(t));
@@ -436,15 +494,13 @@ class CeligoUScraper {
                             // Try to find feedback
                             const feedback = q.querySelector('[class*="feedback"], [class*="explanation"]')?.textContent.trim();
 
-                            if (questionText && questionText.length > 10) {
-                                content.knowledgeChecks.push({
-                                    id: `injected-kc-${i}`,
-                                    question: questionText,
-                                    choices: choices,
-                                    correctAnswer: correctAnswer,
-                                    feedback: feedback || ''
-                                });
-                            }
+                            content.knowledgeChecks.push({
+                                id: `injected-kc-${i}`,
+                                question: questionText,
+                                choices: choices,
+                                correctAnswer: correctAnswer,
+                                feedback: feedback || ''
+                            });
                         });
 
                         return content;
@@ -573,19 +629,35 @@ class CeligoUScraper {
         });
 
         // === ADDITIONAL CLEANUP ===
-        // Remove duplicate hotspot points within each hotspot
-        combined.content.hotspots = combined.content.hotspots.map(hotspot => {
+
+        // Merge all hotspot points into a single deduplicated hotspot
+        const allHotspotPoints = [];
+        const seenPointHashes = new Set();
+        combined.content.hotspots.forEach(hotspot => {
             if (hotspot.points && Array.isArray(hotspot.points)) {
-                const seenPoints = new Set();
-                hotspot.points = hotspot.points.filter(point => {
-                    const pointHash = (point.title || '') + '|' + (point.description || '').substring(0, 50);
-                    if (seenPoints.has(pointHash)) return false;
-                    seenPoints.add(pointHash);
-                    return true;
+                hotspot.points.forEach(point => {
+                    // Create hash from meaningful content
+                    const meaningfulContent = (point.title || '') + '|' + (point.description || point.rawLabel || '').substring(0, 100);
+                    if (meaningfulContent.length > 5 && !seenPointHashes.has(meaningfulContent)) {
+                        seenPointHashes.add(meaningfulContent);
+                        allHotspotPoints.push({
+                            ...point,
+                            index: allHotspotPoints.length
+                        });
+                    }
                 });
             }
-            return hotspot;
-        }).filter(h => h.points && h.points.length > 0);
+        });
+
+        // Replace hotspots array with single deduplicated hotspot
+        if (allHotspotPoints.length > 0) {
+            combined.content.hotspots = [{
+                id: 'hotspots-combined',
+                points: allHotspotPoints
+            }];
+        } else {
+            combined.content.hotspots = [];
+        }
 
         // Remove duplicate text blocks with same content
         const textSeen = new Set();
@@ -602,6 +674,20 @@ class CeligoUScraper {
             const listHash = (list.items || []).join('|').substring(0, 150);
             if (listSeen.has(listHash)) return false;
             listSeen.add(listHash);
+            return true;
+        });
+
+        // Remove false positive and duplicate knowledge checks
+        const kcSeen = new Set();
+        combined.content.knowledgeChecks = combined.content.knowledgeChecks.filter(kc => {
+            if (!kc.question || kc.question.length < 10) return false;
+            // Filter false positives
+            const lower = kc.question.toLowerCase();
+            if (FALSE_POSITIVE_KC.some(fp => lower.includes(fp))) return false;
+            // Deduplicate
+            const kcHash = kc.question.substring(0, 100);
+            if (kcSeen.has(kcHash)) return false;
+            kcSeen.add(kcHash);
             return true;
         });
 
@@ -692,5 +778,11 @@ class CeligoUScraper {
 
 // Initialize when popup loads
 document.addEventListener('DOMContentLoaded', () => {
+    // Set version in header
+    const versionEl = document.getElementById('version');
+    if (versionEl) {
+        versionEl.textContent = `v${VERSION}`;
+    }
+
     new CeligoUScraper();
 });
