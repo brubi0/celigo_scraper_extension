@@ -1,10 +1,10 @@
 /**
  * Celigo U Scraper - Popup Script
  * Handles UI interactions and communicates with content scripts
- * @version 1.0.5
+ * @version 1.0.6
  */
 
-const VERSION = '1.0.5';
+const VERSION = '1.0.6';
 
 // UI elements to exclude from scraping (navigation buttons, markers, etc.)
 const EXCLUDE_LABELS = [
@@ -214,7 +214,7 @@ class CeligoUScraper {
             // Method 1: Try direct message to content scripts
             let mainResponse = null;
             let iframeResponse = null;
-            
+
             try {
                 mainResponse = await chrome.tabs.sendMessage(tab.id, { action: 'scrapeMainPage' });
             } catch (e) {
@@ -233,6 +233,72 @@ class CeligoUScraper {
                 allFramesResponse = await chrome.runtime.sendMessage({ action: 'executeInAllFrames' });
             } catch (e) {
                 console.log('All frames execution note:', e.message);
+            }
+
+            // Method 2.5: Extract metadata from MAIN FRAME ONLY (Skilljar page)
+            let mainFrameMetadata = null;
+            try {
+                const metadataResults = await chrome.scripting.executeScript({
+                    target: { tabId: tab.id, allFrames: false },
+                    func: () => {
+                        const metadata = {
+                            url: window.location.href,
+                            course: '',
+                            lesson: '',
+                            path: ''
+                        };
+
+                        // Try Skilljar-specific selectors
+                        const courseTitle = document.querySelector('.course-title, .course-header h1, [class*="course-name"]');
+                        if (courseTitle) {
+                            metadata.course = courseTitle.textContent.trim();
+                        }
+
+                        // Try to get lesson from header or breadcrumb
+                        const lessonTitle = document.querySelector('.lesson-top h2, #lesson-main h2, .lesson-title, [class*="lesson-name"]');
+                        if (lessonTitle) {
+                            metadata.lesson = lessonTitle.textContent.trim();
+                        }
+
+                        // Try breadcrumbs
+                        const breadcrumbs = document.querySelectorAll('.breadcrumb a, .breadcrumbs a, [class*="breadcrumb"] a');
+                        if (breadcrumbs.length > 0) {
+                            const crumbs = Array.from(breadcrumbs).map(a => a.textContent.trim()).filter(t => t.length > 0);
+                            if (crumbs.length >= 1 && !metadata.course) {
+                                metadata.course = crumbs[crumbs.length - 1] || '';
+                            }
+                            if (crumbs.length >= 2) {
+                                metadata.path = crumbs.slice(0, -1).join(' > ');
+                            }
+                        }
+
+                        // Try page title as fallback
+                        if (!metadata.lesson) {
+                            const pageTitle = document.title;
+                            if (pageTitle && pageTitle.includes('|')) {
+                                const parts = pageTitle.split('|').map(p => p.trim());
+                                metadata.lesson = parts[0] || '';
+                                if (!metadata.course && parts.length > 1) {
+                                    metadata.course = parts[1] || '';
+                                }
+                            }
+                        }
+
+                        // Try curriculum list for current lesson
+                        const currentLesson = document.querySelector('.lesson-active .title, [aria-current="page"] .title, .current-lesson');
+                        if (currentLesson && !metadata.lesson) {
+                            metadata.lesson = currentLesson.textContent.trim();
+                        }
+
+                        return metadata;
+                    }
+                });
+
+                if (metadataResults && metadataResults[0] && metadataResults[0].result) {
+                    mainFrameMetadata = metadataResults[0].result;
+                }
+            } catch (e) {
+                console.log('Main frame metadata extraction note:', e.message);
             }
 
             // Method 3: Try direct script injection
@@ -416,12 +482,11 @@ class CeligoUScraper {
                         });
 
                         // Get flip cards - Rise 360 uses specific class patterns
-                        document.querySelectorAll('[class*="flip-card"], .flip-card, [class*="flashcard"], [class*="blocks-flip"], .blocks-flip-card').forEach((card, i) => {
-                            // Try multiple selector patterns for front/back
+                        // Selector 1: Common flip card patterns
+                        document.querySelectorAll('[class*="flip-card"], .flip-card, [class*="flashcard"], [class*="blocks-flip"], .blocks-flip-card, [class*="FlipCard"]').forEach((card, i) => {
                             let front = card.querySelector('[class*="flip-card__front"], [class*="front"], .front, [class*="face-front"]')?.textContent.trim();
                             let back = card.querySelector('[class*="flip-card__back"], [class*="back"], .back, [class*="face-back"]')?.textContent.trim();
 
-                            // Rise 360 sometimes uses data attributes or specific child structure
                             if (!front && !back) {
                                 const faces = card.querySelectorAll('[class*="face"], [class*="side"]');
                                 if (faces.length >= 2) {
@@ -430,7 +495,6 @@ class CeligoUScraper {
                                 }
                             }
 
-                            // Also try aria-label patterns
                             if (!front) front = card.getAttribute('aria-label') || '';
 
                             if (front || back) {
@@ -442,17 +506,56 @@ class CeligoUScraper {
                             }
                         });
 
-                        // Additional Rise 360 flip card pattern - sometimes in separate containers
-                        document.querySelectorAll('[data-block-type="flip-card"], [class*="FlipCard"]').forEach((card, i) => {
-                            const front = card.querySelector('[class*="front"], [data-side="front"]')?.textContent.trim();
-                            const back = card.querySelector('[class*="back"], [data-side="back"]')?.textContent.trim();
+                        // Selector 2: Rise 360 flashcard blocks (fr-flashcard pattern)
+                        document.querySelectorAll('[class*="fr-flashcard"], [class*="flashcard-block"], [data-block-type*="flash"]').forEach((card, i) => {
+                            const front = card.querySelector('[class*="term"], [class*="front"], [class*="question"]')?.textContent.trim();
+                            const back = card.querySelector('[class*="definition"], [class*="back"], [class*="answer"]')?.textContent.trim();
                             if ((front || back) && !content.flipCards.some(fc => fc.front === front && fc.back === back)) {
                                 content.flipCards.push({
-                                    id: `injected-fc-rise-${i}`,
+                                    id: `injected-fc-fr-${i}`,
                                     front: front || '',
                                     back: back || ''
                                 });
                             }
+                        });
+
+                        // Selector 3: Button-based flip cards (Rise 360 interactive)
+                        document.querySelectorAll('button[class*="card"], [role="button"][class*="card"]').forEach((btn, i) => {
+                            const parent = btn.closest('[class*="flip"], [class*="flash"], [class*="card-container"]');
+                            if (parent) {
+                                const allText = parent.querySelectorAll('p, span, div');
+                                const texts = Array.from(allText).map(el => el.textContent.trim()).filter(t => t.length > 5);
+                                if (texts.length >= 2) {
+                                    const front = texts[0];
+                                    const back = texts.slice(1).join(' ');
+                                    if (!content.flipCards.some(fc => fc.front === front)) {
+                                        content.flipCards.push({
+                                            id: `injected-fc-btn-${i}`,
+                                            front: front,
+                                            back: back
+                                        });
+                                    }
+                                }
+                            }
+                        });
+
+                        // Selector 4: Rise 360 blocks with specific structure (term/definition pairs)
+                        document.querySelectorAll('[class*="blocks-flashcard"], [class*="block-flashcard"]').forEach((block, i) => {
+                            const cards = block.querySelectorAll('[class*="card"]');
+                            cards.forEach((card, j) => {
+                                const texts = Array.from(card.querySelectorAll('p, h2, h3, h4, span')).map(el => el.textContent.trim()).filter(t => t.length > 3);
+                                if (texts.length >= 1) {
+                                    const front = texts[0];
+                                    const back = texts.length > 1 ? texts.slice(1).join(' ') : '';
+                                    if (!content.flipCards.some(fc => fc.front === front)) {
+                                        content.flipCards.push({
+                                            id: `injected-fc-block-${i}-${j}`,
+                                            front: front,
+                                            back: back
+                                        });
+                                    }
+                                }
+                            });
                         });
 
                         // Get tables
@@ -538,7 +641,7 @@ class CeligoUScraper {
             }
 
             // Combine all results
-            this.currentData = this.combineResults(mainResponse, iframeResponse, allFramesResponse, injectedResponse);
+            this.currentData = this.combineResults(mainResponse, iframeResponse, allFramesResponse, injectedResponse, mainFrameMetadata);
             
             // Update UI
             this.displayResults(this.currentData);
@@ -587,6 +690,16 @@ class CeligoUScraper {
 
         // Merge all responses
         responses.forEach(response => {
+            // Handle plain metadata object (from mainFrameMetadata)
+            if (response && !response.success && !response.data && (response.url || response.course || response.lesson)) {
+                Object.keys(response).forEach(key => {
+                    if (response[key] && !combined.metadata[key]) {
+                        combined.metadata[key] = response[key];
+                    }
+                });
+                return;
+            }
+
             if (response && response.success && response.data) {
                 // Merge metadata from response.data.metadata
                 if (response.data.metadata) {
