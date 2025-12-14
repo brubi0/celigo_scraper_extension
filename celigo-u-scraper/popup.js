@@ -1,10 +1,10 @@
 /**
  * Celigo U Scraper - Popup Script
  * Handles UI interactions and communicates with content scripts
- * @version 1.0.4
+ * @version 1.0.5
  */
 
-const VERSION = '1.0.4';
+const VERSION = '1.0.5';
 
 // UI elements to exclude from scraping (navigation buttons, markers, etc.)
 const EXCLUDE_LABELS = [
@@ -153,29 +153,37 @@ class CeligoUScraper {
     async checkPageStatus() {
         try {
             const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-            
+
             if (!tab.url.includes('training.celigo.com')) {
                 this.setPageStatus('Not a Celigo U page', 'error');
                 this.showMessage('Navigate to a Celigo U training page to use this extension.', 'info');
                 return;
             }
 
-            // Get page metadata from content script
-            const response = await chrome.tabs.sendMessage(tab.id, { action: 'getPageInfo' });
-            
-            if (response && response.success) {
-                this.setPageStatus('Ready', 'success');
-                this.elements.courseName.textContent = response.data.course || '—';
-                this.elements.lessonName.textContent = response.data.lesson || '—';
-                this.elements.scrapeBtn.disabled = false;
-            } else {
-                this.setPageStatus('Page ready', 'success');
-                this.elements.scrapeBtn.disabled = false;
+            // Try to get page metadata from content script
+            try {
+                const response = await chrome.tabs.sendMessage(tab.id, { action: 'getPageInfo' });
+
+                if (response && response.success) {
+                    this.setPageStatus('Ready', 'success');
+                    this.elements.courseName.textContent = response.data.course || '—';
+                    this.elements.lessonName.textContent = response.data.lesson || '—';
+                    this.elements.scrapeBtn.disabled = false;
+                    return;
+                }
+            } catch (e) {
+                // Content scripts not loaded - this is OK, we can still use direct injection
+                console.log('Content scripts not ready, will use direct injection');
             }
+
+            // Content scripts not responding, but we can still scrape via direct injection
+            this.setPageStatus('Ready (direct mode)', 'success');
+            this.elements.scrapeBtn.disabled = false;
+
         } catch (error) {
             console.error('Status check error:', error);
-            this.setPageStatus('Extension not loaded', 'error');
-            this.showMessage('Refresh the page and try again.', 'info');
+            this.setPageStatus('Error', 'error');
+            this.showMessage('Could not access tab. Try refreshing the page.', 'info');
         }
     }
 
