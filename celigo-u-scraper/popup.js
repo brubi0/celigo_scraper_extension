@@ -1,10 +1,10 @@
 /**
  * Celigo U Scraper - Popup Script
  * Handles UI interactions and communicates with content scripts
- * @version 1.0.10
+ * @version 1.0.11
  */
 
-const VERSION = '1.0.10';
+const VERSION = '1.0.11';
 
 // UI elements to exclude from scraping (navigation buttons, markers, etc.)
 const EXCLUDE_LABELS = [
@@ -386,7 +386,25 @@ class CeligoUScraper {
                                 flashcardElements: document.querySelectorAll('[class*="flashcard"]').length,
                                 blockFlashcards: document.querySelectorAll('.block-flashcards').length,
                                 liFlashcard: document.querySelectorAll('li.flashcard').length,
-                                frViewP: document.querySelectorAll('.fr-view p').length
+                                frViewP: document.querySelectorAll('.fr-view p').length,
+                                // Detailed flashcard debug
+                                flashcardDetails: Array.from(document.querySelectorAll('li.flashcard')).map((card, i) => {
+                                    const frontSide = card.querySelector('[class*="--front"]');
+                                    const backSide = card.querySelector('[class*="--back"]');
+                                    return {
+                                        index: i,
+                                        cardClasses: card.className,
+                                        hasFrontSide: !!frontSide,
+                                        hasBackSide: !!backSide,
+                                        frontSideClasses: frontSide?.className || 'N/A',
+                                        backSideClasses: backSide?.className || 'N/A',
+                                        frontFrViewP: frontSide?.querySelector('.fr-view p')?.textContent?.substring(0, 50) || 'NOT FOUND',
+                                        backFrViewP: backSide?.querySelector('.fr-view p')?.textContent?.substring(0, 50) || 'NOT FOUND',
+                                        frontAllP: frontSide?.querySelectorAll('p').length || 0,
+                                        backAllP: backSide?.querySelectorAll('p').length || 0,
+                                        cardInnerHTML: card.innerHTML.substring(0, 500)
+                                    };
+                                })
                             }
                         };
 
