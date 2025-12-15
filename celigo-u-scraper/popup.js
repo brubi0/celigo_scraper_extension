@@ -1,10 +1,10 @@
 /**
  * Celigo U Scraper - Popup Script
  * Handles UI interactions and communicates with content scripts
- * @version 1.0.12
+ * @version 1.0.13
  */
 
-const VERSION = '1.0.12';
+const VERSION = '1.0.13';
 
 // UI elements to exclude from scraping (navigation buttons, markers, etc.)
 const EXCLUDE_LABELS = [
@@ -248,16 +248,40 @@ class CeligoUScraper {
                             path: ''
                         };
 
-                        // Try Skilljar-specific selectors
-                        const courseTitle = document.querySelector('.course-title, .course-header h1, [class*="course-name"]');
-                        if (courseTitle) {
-                            metadata.course = courseTitle.textContent.trim();
+                        // Try Skilljar-specific selectors (training.celigo.com uses Skilljar)
+                        // Course title - try multiple selectors
+                        const courseSelectors = [
+                            '.course-title',
+                            '.course-header h1',
+                            '[class*="course-name"]',
+                            '.path-title',
+                            '#course-title',
+                            'h1.title'
+                        ];
+                        for (const sel of courseSelectors) {
+                            const el = document.querySelector(sel);
+                            if (el && el.textContent.trim()) {
+                                metadata.course = el.textContent.trim();
+                                break;
+                            }
                         }
 
-                        // Try to get lesson from header or breadcrumb
-                        const lessonTitle = document.querySelector('.lesson-top h2, #lesson-main h2, .lesson-title, [class*="lesson-name"]');
-                        if (lessonTitle) {
-                            metadata.lesson = lessonTitle.textContent.trim();
+                        // Lesson title - try multiple selectors
+                        const lessonSelectors = [
+                            '.lesson-top h2',
+                            '#lesson-main h2',
+                            '.lesson-title',
+                            '[class*="lesson-name"]',
+                            '.lesson-header h2',
+                            '.content-title',
+                            'h2.title'
+                        ];
+                        for (const sel of lessonSelectors) {
+                            const el = document.querySelector(sel);
+                            if (el && el.textContent.trim()) {
+                                metadata.lesson = el.textContent.trim();
+                                break;
+                            }
                         }
 
                         // Try breadcrumbs
@@ -273,21 +297,42 @@ class CeligoUScraper {
                         }
 
                         // Try page title as fallback
-                        if (!metadata.lesson) {
+                        if (!metadata.lesson || !metadata.course) {
                             const pageTitle = document.title;
-                            if (pageTitle && pageTitle.includes('|')) {
+                            if (pageTitle) {
+                                // Common patterns: "Lesson Name | Course Name | Site"
                                 const parts = pageTitle.split('|').map(p => p.trim());
-                                metadata.lesson = parts[0] || '';
-                                if (!metadata.course && parts.length > 1) {
+                                if (!metadata.lesson && parts.length >= 1) {
+                                    metadata.lesson = parts[0] || '';
+                                }
+                                if (!metadata.course && parts.length >= 2) {
                                     metadata.course = parts[1] || '';
                                 }
                             }
                         }
 
                         // Try curriculum list for current lesson
-                        const currentLesson = document.querySelector('.lesson-active .title, [aria-current="page"] .title, .current-lesson');
+                        const currentLesson = document.querySelector('.lesson-active .title, [aria-current="page"] .title, .current-lesson, .lesson.active .title');
                         if (currentLesson && !metadata.lesson) {
                             metadata.lesson = currentLesson.textContent.trim();
+                        }
+
+                        // Extract from URL path as last resort
+                        // URL pattern: /path/course-name/lesson-name/id/scorm/id
+                        if (!metadata.course || !metadata.lesson) {
+                            const urlPath = window.location.pathname;
+                            const pathParts = urlPath.split('/').filter(p => p.length > 0);
+                            // Look for readable names (not IDs)
+                            const readableParts = pathParts.filter(p => !(/^\d+$/.test(p) || /^[a-z0-9]{10,}$/i.test(p)));
+                            if (readableParts.length >= 2 && !metadata.course) {
+                                // Convert kebab-case to Title Case
+                                metadata.course = readableParts[readableParts.length - 2]
+                                    .split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                            }
+                            if (readableParts.length >= 1 && !metadata.lesson) {
+                                metadata.lesson = readableParts[readableParts.length - 1]
+                                    .split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                            }
                         }
 
                         return metadata;
@@ -458,14 +503,20 @@ class CeligoUScraper {
                         document.querySelectorAll('img').forEach((img, i) => {
                             const src = img.src || img.getAttribute('data-src') || '';
                             const alt = img.alt || '';
-                            // Skip tiny images (icons, spacers) and data URIs
-                            if (src && !src.startsWith('data:') && img.naturalWidth > 50 && img.naturalHeight > 50) {
+                            // Use naturalWidth/Height if available, otherwise fall back to attributes
+                            const width = img.naturalWidth || img.width || parseInt(img.getAttribute('width')) || 0;
+                            const height = img.naturalHeight || img.height || parseInt(img.getAttribute('height')) || 0;
+                            // Skip tiny images (icons, spacers), data URIs, and tracking pixels
+                            // Also include images with no dimensions if they have a valid src (may not be loaded yet)
+                            const hasValidSrc = src && !src.startsWith('data:') && !src.includes('tracking') && !src.includes('pixel');
+                            const hasValidSize = (width > 50 && height > 50) || (width === 0 && height === 0);
+                            if (hasValidSrc && hasValidSize) {
                                 content.images.push({
                                     id: `injected-img-${i}`,
                                     src: src,
                                     alt: alt,
-                                    width: img.naturalWidth,
-                                    height: img.naturalHeight
+                                    width: width,
+                                    height: height
                                 });
                             }
                         });
