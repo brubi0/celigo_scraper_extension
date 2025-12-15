@@ -1,10 +1,10 @@
 /**
  * Celigo U Scraper - Popup Script
  * Handles UI interactions and communicates with content scripts
- * @version 1.0.8
+ * @version 1.0.9
  */
 
-const VERSION = '1.0.8';
+const VERSION = '1.0.9';
 
 // UI elements to exclude from scraping (navigation buttons, markers, etc.)
 const EXCLUDE_LABELS = [
@@ -380,7 +380,14 @@ class CeligoUScraper {
                             textBlocks: [],
                             lists: [],
                             tables: [],
-                            images: []
+                            images: [],
+                            _debug: {
+                                frameUrl: window.location.href,
+                                flashcardElements: document.querySelectorAll('[class*="flashcard"]').length,
+                                blockFlashcards: document.querySelectorAll('.block-flashcards').length,
+                                liFlashcard: document.querySelectorAll('li.flashcard').length,
+                                frViewP: document.querySelectorAll('.fr-view p').length
+                            }
                         };
 
                         // Extract metadata from page
@@ -591,6 +598,42 @@ class CeligoUScraper {
                             }
                         });
 
+                        // Selector 7: Most aggressive - any element with flashcard in class
+                        document.querySelectorAll('[class*="flashcard"]').forEach((el, i) => {
+                            // Look for front/back sides within this element
+                            const frontSide = el.querySelector('[class*="--front"] .fr-view p, [class*="--front"] p');
+                            const backSide = el.querySelector('[class*="--back"] .fr-view p, [class*="--back"] p');
+                            if (frontSide && backSide) {
+                                const front = frontSide.textContent.trim();
+                                const back = backSide.textContent.trim();
+                                if (front && !content.flipCards.some(fc => fc.front === front)) {
+                                    content.flipCards.push({
+                                        id: `injected-fc-any-${i}`,
+                                        front: front,
+                                        back: back
+                                    });
+                                }
+                            }
+                        });
+
+                        // Selector 8: Look for .fr-view p pairs near "flip card" text
+                        const allFrViewP = document.querySelectorAll('.fr-view p');
+                        const frTexts = Array.from(allFrViewP).map(p => p.textContent.trim()).filter(t => t.length > 0 && t.length < 200);
+                        // Look for short text pairs that could be flashcard front/back
+                        for (let i = 0; i < frTexts.length - 1; i++) {
+                            const text = frTexts[i];
+                            const nextText = frTexts[i + 1];
+                            // If both are short (likely term/definition) and not already captured
+                            if (text.length < 50 && nextText.length < 150 &&
+                                !content.textBlocks.some(tb => tb.content === text) === false) {
+                                // Check if this looks like a term (short, no period at end)
+                                if (!text.endsWith('.') && !text.endsWith('?') && !text.endsWith(':')) {
+                                    // Could be a flashcard - but only add if we have NO flashcards yet
+                                    // This is very aggressive, only use as last resort
+                                }
+                            }
+                        }
+
                         // Get tables
                         document.querySelectorAll('table').forEach((table, i) => {
                             const headers = Array.from(table.querySelectorAll('th')).map(th => th.textContent.trim());
@@ -654,12 +697,17 @@ class CeligoUScraper {
                 // Aggregate injection results
                 injectedResponse = {
                     success: true,
-                    data: { content: {} }
+                    data: { content: {}, _debugFrames: [] }
                 };
-                
+
                 injectionResults.forEach(result => {
                     if (result.result) {
                         Object.keys(result.result).forEach(key => {
+                            if (key === '_debug') {
+                                // Collect debug info from each frame
+                                injectedResponse.data._debugFrames.push(result.result._debug);
+                                return;
+                            }
                             if (!injectedResponse.data.content[key]) {
                                 injectedResponse.data.content[key] = [];
                             }
@@ -718,6 +766,7 @@ class CeligoUScraper {
                 videos: [],
                 rawText: ''
             },
+            _debugFrames: [],
             statistics: {}
         };
 
@@ -734,6 +783,11 @@ class CeligoUScraper {
             }
 
             if (response && response.success && response.data) {
+                // Collect debug frames
+                if (response.data._debugFrames && Array.isArray(response.data._debugFrames)) {
+                    combined._debugFrames.push(...response.data._debugFrames);
+                }
+
                 // Merge metadata from response.data.metadata
                 if (response.data.metadata) {
                     Object.keys(response.data.metadata).forEach(key => {
