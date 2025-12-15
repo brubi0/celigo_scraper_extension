@@ -1,10 +1,10 @@
 /**
  * Celigo U Scraper - Popup Script
  * Handles UI interactions and communicates with content scripts
- * @version 1.0.11
+ * @version 1.0.12
  */
 
-const VERSION = '1.0.11';
+const VERSION = '1.0.12';
 
 // UI elements to exclude from scraping (navigation buttons, markers, etc.)
 const EXCLUDE_LABELS = [
@@ -454,6 +454,22 @@ class CeligoUScraper {
                             }
                         });
 
+                        // Get images
+                        document.querySelectorAll('img').forEach((img, i) => {
+                            const src = img.src || img.getAttribute('data-src') || '';
+                            const alt = img.alt || '';
+                            // Skip tiny images (icons, spacers) and data URIs
+                            if (src && !src.startsWith('data:') && img.naturalWidth > 50 && img.naturalHeight > 50) {
+                                content.images.push({
+                                    id: `injected-img-${i}`,
+                                    src: src,
+                                    alt: alt,
+                                    width: img.naturalWidth,
+                                    height: img.naturalHeight
+                                });
+                            }
+                        });
+
                         // Get labeled graphic content with filtering and parsing
                         document.querySelectorAll('[class*="labeled-graphic"]').forEach((lg, i) => {
                             const items = [];
@@ -762,11 +778,21 @@ class CeligoUScraper {
 
             // Combine all results
             this.currentData = this.combineResults(mainResponse, iframeResponse, allFramesResponse, injectedResponse, mainFrameMetadata);
-            
+
             // Update UI
             this.displayResults(this.currentData);
             this.elements.copyBtn.disabled = false;
-            
+
+            // Update course/lesson display from scraped metadata
+            if (this.currentData.metadata) {
+                if (this.currentData.metadata.course) {
+                    this.elements.courseName.textContent = this.currentData.metadata.course;
+                }
+                if (this.currentData.metadata.lesson) {
+                    this.elements.lessonName.textContent = this.currentData.metadata.lesson;
+                }
+            }
+
             const totalItems = this.currentData.statistics.totalItems;
             if (totalItems > 0) {
                 this.showMessage(`Content extracted successfully! Found ${totalItems} items.`, 'success');
@@ -935,6 +961,15 @@ class CeligoUScraper {
             const kcHash = kc.question.substring(0, 100);
             if (kcSeen.has(kcHash)) return false;
             kcSeen.add(kcHash);
+            return true;
+        });
+
+        // Remove duplicate images by src
+        const imgSeen = new Set();
+        combined.content.images = combined.content.images.filter(img => {
+            if (!img.src) return false;
+            if (imgSeen.has(img.src)) return false;
+            imgSeen.add(img.src);
             return true;
         });
 
