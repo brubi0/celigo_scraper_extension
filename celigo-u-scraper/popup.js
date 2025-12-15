@@ -1,10 +1,10 @@
 /**
  * Celigo U Scraper - Popup Script
  * Handles UI interactions and communicates with content scripts
- * @version 1.0.9
+ * @version 1.0.10
  */
 
-const VERSION = '1.0.9';
+const VERSION = '1.0.10';
 
 // UI elements to exclude from scraping (navigation buttons, markers, etc.)
 const EXCLUDE_LABELS = [
@@ -569,8 +569,13 @@ class CeligoUScraper {
                         // Structure: .block-flashcards > ol > li.flashcard > .flashcard-side--front/.flashcard-side--back
                         document.querySelectorAll('.block-flashcards, [class*="block-flashcards"]').forEach((container, i) => {
                             container.querySelectorAll('li.flashcard, [class*="flashcard"][role="listitem"]').forEach((card, j) => {
-                                const frontEl = card.querySelector('.flashcard-side--front .fr-view p, [class*="flashcard-side--front"] .fr-view p');
-                                const backEl = card.querySelector('.flashcard-side--back .fr-view p, [class*="flashcard-side--back"] .fr-view p');
+                                // Try multiple selector patterns for front/back
+                                const frontEl = card.querySelector('[class*="--front"] .fr-view p') ||
+                                                card.querySelector('[class*="--front"] p') ||
+                                                card.querySelector('.flashcard-side--front .fr-view p');
+                                const backEl = card.querySelector('[class*="--back"] .fr-view p') ||
+                                               card.querySelector('[class*="--back"] p') ||
+                                               card.querySelector('.flashcard-side--back .fr-view p');
                                 const front = frontEl?.textContent.trim() || '';
                                 const back = backEl?.textContent.trim() || '';
                                 if (front && !content.flipCards.some(fc => fc.front === front)) {
@@ -585,16 +590,32 @@ class CeligoUScraper {
 
                         // Selector 6: Fallback - find any li.flashcard even without container
                         document.querySelectorAll('li.flashcard').forEach((card, i) => {
-                            const frontEl = card.querySelector('.flashcard-side--front .fr-view p');
-                            const backEl = card.querySelector('.flashcard-side--back .fr-view p');
-                            const front = frontEl?.textContent.trim() || '';
-                            const back = backEl?.textContent.trim() || '';
-                            if (front && !content.flipCards.some(fc => fc.front === front)) {
-                                content.flipCards.push({
-                                    id: `injected-fc-li-${i}`,
-                                    front: front,
-                                    back: back
-                                });
+                            // Get all .fr-view p elements inside the card
+                            const allP = card.querySelectorAll('.fr-view p');
+                            if (allP.length >= 2) {
+                                // First two p elements are likely front and back
+                                const front = allP[0]?.textContent.trim() || '';
+                                const back = allP[1]?.textContent.trim() || '';
+                                if (front && !content.flipCards.some(fc => fc.front === front)) {
+                                    content.flipCards.push({
+                                        id: `injected-fc-li-${i}`,
+                                        front: front,
+                                        back: back
+                                    });
+                                }
+                            } else {
+                                // Try class-based selectors
+                                const frontEl = card.querySelector('[class*="--front"] .fr-view p, [class*="--front"] p');
+                                const backEl = card.querySelector('[class*="--back"] .fr-view p, [class*="--back"] p');
+                                const front = frontEl?.textContent.trim() || '';
+                                const back = backEl?.textContent.trim() || '';
+                                if (front && !content.flipCards.some(fc => fc.front === front)) {
+                                    content.flipCards.push({
+                                        id: `injected-fc-li-${i}`,
+                                        front: front,
+                                        back: back
+                                    });
+                                }
                             }
                         });
 
